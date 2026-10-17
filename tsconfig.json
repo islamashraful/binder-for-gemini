@@ -1,0 +1,8 @@
+{
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "noUncheckedIndexedAccess": true,
+    "types": ["bun"]
+  },
+  "include": [".wxt/wxt.d.ts", "src", "tests", "scripts", "wxt.config.ts"]
+}
