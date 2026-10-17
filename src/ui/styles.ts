@@ -178,9 +178,57 @@ button:focus-visible, .row:focus-visible, input:focus-visible {
 .btn.danger { background: var(--danger); color: var(--menu-bg); }
 .btn.danger:hover { filter: brightness(1.08); }
 .menu-foot { padding: 6px 16px 2px; color: var(--muted); font-size: 12px; }
+.btn:disabled { opacity: 0.45; cursor: default; filter: none; }
+
+/* Picking chats to delete */
+.row.selected { background: var(--drop); }
+.check {
+  width: 18px; height: 18px; margin: 0 5px; flex: none; display: grid; place-items: center;
+  border: 2px solid var(--muted); border-radius: 4px; color: transparent;
+}
+.check .icon { width: 14px; height: 14px; }
+.check.on, .check.mixed { background: var(--accent); border-color: var(--accent); color: var(--menu-bg); }
+.check:disabled { opacity: 0.45; cursor: default; }
+.selbar {
+  position: fixed; left: 8px; bottom: 12px; width: 300px; pointer-events: auto; overflow: hidden;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 12px 12px 16px;
+  border-radius: 16px; background: var(--menu-bg); box-shadow: var(--menu-shadow); color: var(--fg);
+}
+.bar-text { flex: 1 1 140px; min-width: 0; line-height: 18px; }
+.bar-text b { font-weight: 500; }
+.bar-hint { color: var(--muted); font-size: 12px; }
+.bar-hint.error { color: var(--danger); }
+.bar-actions { display: flex; gap: 4px; margin-left: auto; }
+.bar-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--line); }
+.bar-progress div { height: 100%; background: var(--accent); transition: width .2s; }
 `;
 
 /** Added to Gemini's page (not the shadow root) to hide chats that are in a folder. */
 export const PAGE_CSS = `
 html.binder-hide-filed [data-binder-filed] { display: none !important; }
+
+/* Picking chats to delete: a checkbox on each chat in Gemini's list. */
+html.binder-selecting [data-test-id="all-conversations"] gem-nav-list-item { position: relative; }
+html.binder-selecting [data-test-id="all-conversations"] gem-nav-list-item > a { padding-right: 44px !important; }
+html.binder-selecting [data-test-id="all-conversations"] gem-nav-list-item .hovered-trailing-content,
+html.binder-selecting [data-test-id="all-conversations"] gem-nav-list-item .trailing-content {
+  display: none !important;
+}
+html.binder-selecting [data-test-id="all-conversations"] gem-nav-list-item::after {
+  content: ""; position: absolute; right: 16px; top: 50%; width: 18px; height: 18px; margin-top: -9px;
+  box-sizing: border-box; border: 2px solid currentColor; border-radius: 4px; opacity: 0.55;
+  pointer-events: none;
+}
+html.binder-selecting [data-binder-selected]::after {
+  opacity: 1; border-color: #0b57d0; background: #0b57d0;
+}
+html.binder-selecting [data-binder-selected]::before {
+  content: ""; position: absolute; right: 22px; top: 50%; width: 5px; height: 10px; margin-top: -7px;
+  border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); z-index: 1;
+  pointer-events: none;
+}
+html.binder-selecting [data-binder-selected] > a { background-color: rgba(11, 87, 208, 0.12) !important; }
+html.binder-selecting body.dark-theme [data-binder-selected]::after { border-color: #a8c7fa; background: #a8c7fa; }
+html.binder-selecting body.dark-theme [data-binder-selected]::before { border-color: #062e6f; }
+html.binder-selecting body.dark-theme [data-binder-selected] > a { background-color: rgba(168, 199, 250, 0.16) !important; }
 `;

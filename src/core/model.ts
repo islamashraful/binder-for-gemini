@@ -320,6 +320,25 @@ export function unfileChat(state: State, chatId: string): State {
   return next;
 }
 
+/** Forgets several chats at once (used after they are deleted from Gemini). */
+export function removeChats(state: State, chatIds: Iterable<string>): State {
+  let next: State | null = null;
+  for (const id of chatIds) {
+    if (!state.chats[id]) continue;
+    next ??= clone(state);
+    delete next.chats[id];
+  }
+  return next ?? state;
+}
+
+/** Ids of the chats in a folder and all its subfolders. */
+export function chatIdsDeep(state: State, folderId: string): string[] {
+  const ids = new Set([folderId, ...descendantIds(state, folderId)]);
+  return Object.values(state.chats)
+    .filter((c) => ids.has(c.folderId))
+    .map((c) => c.id);
+}
+
 /** Keeps stored titles in sync when a chat is renamed in Gemini. */
 export function updateTitles(state: State, titles: Map<string, string>): State {
   let next: State | null = null;

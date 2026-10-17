@@ -12,6 +12,8 @@ Not affiliated with or endorsed by Google. Gemini is a trademark of Google LLC.
 - **File the open chat** with the folder button next to "Folders".
 - **Search** across folder names and filed chat titles.
 - **Colors, rename, reorder** (drag a folder above, below, or onto another).
+- **Delete chats in bulk**: tick chats in Gemini's list or in your folders, then
+  delete them all from Gemini in one go. This is permanent.
 - **Backup**: export to a JSON file, restore from it.
 - Clicking a filed chat switches to it without reloading the page.
 - Titles stay in sync when you rename a chat in Gemini.
@@ -53,8 +55,18 @@ Firefox: `bun run build:firefox` and load `.output/firefox-mv2` from
 | Move a folder to the top level | Drag it onto the "Folders" header |
 | Rename quickly | Double-click a folder, or select it and press F2 |
 | Open in a new tab | Cmd/Ctrl-click a chat |
+| Delete chats from Gemini | **⋯ → Delete chats…**, tick chats, then **Delete…** |
+| Delete a folder's chats | Hover the folder → **⋯ → Delete chats in this folder…** |
+| Select a range of chats | While deleting, shift-click in Gemini's list |
 
 Deleting a folder never deletes chats from Gemini; they just go back to the list.
+
+**Deleting chats** removes them from your Gemini history for good; there's no undo,
+and a Binder backup does not keep the conversations. The extension does it the
+way you would: it opens each chat's ⋯ menu in Gemini's sidebar, picks Delete,
+and confirms. A chat counts as deleted only once it disappears from Gemini's
+list. Keep the tab open until it finishes; **Stop** halts it between chats.
+Chats that fail stay selected so you can try again.
 
 Each Google account you use in Gemini (`/u/0`, `/u/1`, …) has its own folders.
 
@@ -105,7 +117,7 @@ Every Gemini chat has a permanent ID in its URL. The extension saves
 
 ```sh
 bun run dev        # opens a fresh Chrome with the extension, reloads on save
-bun test           # 67 tests: data model, page parsing, full UI on a fake Gemini page
+bun test           # 80 tests: data model, page parsing, full UI on a fake Gemini page
 bun run typecheck
 bun run check      # typecheck + tests + build
 bun run icons      # regenerate public/icon/*.png

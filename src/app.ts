@@ -2,11 +2,13 @@
 
 import * as model from './core/model';
 import type { State } from './core/model';
+import type { DeleteOptions, DeleteResult } from './core/gemini-dom';
 import type { StateStore } from './core/store';
 import {
   chatFromEventTarget,
   chatPath,
   currentChat,
+  deleteChats,
   findInsertionAnchor,
   isDarkTheme,
   readSidebarChats,
@@ -23,6 +25,8 @@ export interface AppOptions {
   download?: (filename: string, text: string) => void;
   /** Navigation for chats that aren't loaded in the sidebar. */
   navigate?: (path: string) => void;
+  /** Timing for deleting chats through Gemini's menus (tests make it fast). */
+  deleteOptions?: Pick<DeleteOptions, 'stepTimeoutMs' | 'removeTimeoutMs' | 'loadTimeoutMs' | 'pauseMs'>;
 }
 
 export interface App {
@@ -33,7 +37,19 @@ export interface App {
 }
 
 const FILED_ATTR = 'data-binder-filed';
+const SELECTED_ATTR = 'data-binder-selected';
 const HIDE_CLASS = 'binder-hide-filed';
+const SELECTING_CLASS = 'binder-selecting';
+
+/** Picking chats to delete. */
+interface Selecting {
+  ids: Set<string>;
+  progress: { done: number; total: number } | null;
+  message: string | null;
+  /** Last chat clicked in Gemini's list, for shift-click ranges. */
+  anchor: string | null;
+  stopRequested: boolean;
+}
 
 export async function startApp(store: StateStore, opts: AppOptions = {}): Promise<App> {
   const pollMs = opts.pollMs ?? 500;
@@ -44,6 +60,7 @@ export async function startApp(store: StateStore, opts: AppOptions = {}): Promis
   let state = await store.load();
   let ctx: PanelContext = readContext();
   let stopped = false;
+  let selecting: Selecting | null = null;
 
   // Panel host inside Gemini's sidebar, and a separate overlay for menus.
   const host = document.createElement('binder-for-gemini');
@@ -95,11 +112,34 @@ export async function startApp(store: StateStore, opts: AppOptions = {}): Promis
         return err instanceof Error ? err.message : String(err);
       }
     },
+    startSelecting(ids = []) {
+      if (selecting?.progress) return;
+      selecting = { ids: new Set(ids), progress: null, message: null, anchor: null, stopRequested: false };
+      refresh();
+    },
+    setSelected(ids, selected) {
+      if (!selecting || selecting.progress) return;
+      for (const id of ids) {
+        if (selected) selecting.ids.add(id);
+        else selecting.ids.delete(id);
+      }
+      selecting.message = null;
+      refresh();
+    },
+    stopSelecting() {
+      if (!selecting || selecting.progress) return;
+      selecting = null;
+      refresh();
+    },
+    deleteSelected: () => void deleteSelected(),
+    stopDeleting() {
+      if (selecting?.progress) selecting.stopRequested = true;
+    },
   };
 
   const panel = createPanel(shadow, layerShadow, actions);
   panel.setTheme(isDarkTheme(document));
-  panel.render(state, ctx);
+  renderPanel();
 
   // ---------------------------------------------------------------- core loop
 
@@ -107,8 +147,22 @@ export async function startApp(store: StateStore, opts: AppOptions = {}): Promis
     if (stopped || next === state) return;
     state = next;
     applyToPage();
-    panel.render(state, ctx);
+    renderPanel();
     store.save(state).catch((err) => console.warn('[Binder] Could not save:', err));
+  }
+
+  function renderPanel() {
+    const selection = selecting
+      ? { ids: selecting.ids, progress: selecting.progress, message: selecting.message }
+      : null;
+    panel.render(state, { ...ctx, selection });
+  }
+
+  /** Re-applies UI-only changes (selection) to the page and the panel. */
+  function refresh() {
+    if (stopped) return;
+    applyToPage();
+    renderPanel();
   }
 
   function readContext(): PanelContext {
@@ -125,15 +179,100 @@ export async function startApp(store: StateStore, opts: AppOptions = {}): Promis
 
   /** Marks filed chats in Gemini's list (CSS hides them) and returns their current titles. */
   function applyToPage(): Map<string, string> {
-    document.documentElement.classList.toggle(HIDE_CLASS, state.settings.hideFiled);
+    const root = document.documentElement;
+    root.classList.toggle(HIDE_CLASS, state.settings.hideFiled);
+    root.classList.toggle(SELECTING_CLASS, !!selecting);
     const titles = new Map<string, string>();
     for (const chat of readSidebarChats(document)) {
       const filed = chat.id in state.chats;
       if (filed !== chat.item.hasAttribute(FILED_ATTR)) chat.item.toggleAttribute(FILED_ATTR, filed);
+      const selected = !!selecting?.ids.has(chat.id);
+      if (selected !== chat.item.hasAttribute(SELECTED_ATTR)) chat.item.toggleAttribute(SELECTED_ATTR, selected);
       if (filed && chat.title) titles.set(chat.id, chat.title);
     }
     return titles;
   }
+
+  // ---------------------------------------------------------------- deleting chats
+
+  async function deleteSelected() {
+    const sel = selecting;
+    if (!sel || sel.progress || !sel.ids.size) return;
+    const ids = [...sel.ids];
+    sel.progress = { done: 0, total: ids.length };
+    sel.message = null;
+    sel.stopRequested = false;
+    refresh();
+
+    let result: DeleteResult;
+    try {
+      result = await deleteChats(document, ids, {
+        ...opts.deleteOptions,
+        shouldStop: () => stopped || sel.stopRequested,
+        onProgress(done, total) {
+          sel.progress = { done, total };
+          if (selecting === sel) renderPanel();
+        },
+      });
+    } catch (err) {
+      console.warn('[Binder] Deleting chats failed:', err);
+      result = { deleted: [], failed: ids.map((id) => ({ id, reason: 'no-menu' as const })), skipped: [] };
+    }
+    if (stopped) return;
+
+    // Deleted chats no longer exist, so take them out of their folders too.
+    commit(model.removeChats(state, result.deleted));
+    const n = result.deleted.length;
+    const deleted = `Deleted ${n} chat${n === 1 ? '' : 's'}`;
+    const left = [...result.failed.map((f) => f.id), ...result.skipped];
+    if (!left.length) {
+      selecting = null;
+      refresh();
+      panel.showToast(`${deleted}.`);
+      return;
+    }
+    sel.ids = new Set(left);
+    sel.progress = null;
+    if (result.skipped.length && !result.failed.length) {
+      sel.message = `Stopped. ${deleted}.`;
+    } else {
+      const notFound = result.failed.filter((f) => f.reason === 'not-loaded').length;
+      const why = notFound === result.failed.length
+        ? 'not found in Gemini’s list'
+        : 'Gemini didn’t respond';
+      sel.message = `${deleted}. ${result.failed.length} couldn’t be deleted (${why}); still selected.`;
+    }
+    refresh();
+  }
+
+  /** In select mode, clicking a chat in Gemini's list ticks it instead of opening it. */
+  const onPageClick = (e: MouseEvent) => {
+    if (!selecting) return;
+    const chat = chatFromEventTarget(e.target);
+    if (!chat) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (selecting.progress) return;
+    const on = !selecting.ids.has(chat.id);
+    let ids = [chat.id];
+    if (e.shiftKey && selecting.anchor && selecting.anchor !== chat.id) {
+      // Range over the chats visible in Gemini's list.
+      const visible = readSidebarChats(document)
+        .filter((c) => !(state.settings.hideFiled && c.id in state.chats))
+        .map((c) => c.id);
+      const a = visible.indexOf(selecting.anchor);
+      const b = visible.indexOf(chat.id);
+      if (a >= 0 && b >= 0) {
+        ids = visible.slice(Math.min(a, b), Math.max(a, b) + 1);
+        actions.setSelected(ids, true);
+        selecting.anchor = chat.id;
+        return;
+      }
+    }
+    actions.setSelected(ids, on);
+    if (selecting) selecting.anchor = chat.id;
+  };
+  document.addEventListener('click', onPageClick, true);
 
   function sync() {
     if (stopped) return;
@@ -147,7 +286,7 @@ export async function startApp(store: StateStore, opts: AppOptions = {}): Promis
     ctx = next;
     const renamed = model.updateTitles(state, titles);
     if (renamed !== state) commit(renamed);
-    else if (ctxChanged) panel.render(state, ctx);
+    else if (ctxChanged) renderPanel();
   }
 
   let syncTimer: ReturnType<typeof setTimeout> | undefined;
@@ -179,7 +318,7 @@ export async function startApp(store: StateStore, opts: AppOptions = {}): Promis
   const unwatch = store.watch((next) => {
     state = next;
     applyToPage();
-    panel.render(state, ctx);
+    renderPanel();
   });
 
   // Dragging chats out of Gemini's own list.
@@ -212,12 +351,16 @@ export async function startApp(store: StateStore, opts: AppOptions = {}): Promis
       document.removeEventListener('dragstart', onDragStart, true);
       document.removeEventListener('dragend', onDragFinish, true);
       document.removeEventListener('drop', onDragFinish);
+      document.removeEventListener('click', onPageClick, true);
       panel.destroy();
       host.remove();
       layerHost.remove();
       pageStyle.remove();
-      document.documentElement.classList.remove(HIDE_CLASS);
-      for (const el of document.querySelectorAll(`[${FILED_ATTR}]`)) el.removeAttribute(FILED_ATTR);
+      document.documentElement.classList.remove(HIDE_CLASS, SELECTING_CLASS);
+      for (const el of document.querySelectorAll(`[${FILED_ATTR}], [${SELECTED_ATTR}]`)) {
+        el.removeAttribute(FILED_ATTR);
+        el.removeAttribute(SELECTED_ATTR);
+      }
     },
   };
 }
