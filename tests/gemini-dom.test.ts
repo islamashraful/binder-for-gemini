@@ -4,12 +4,13 @@ import {
   chatFromEventTarget,
   chatPath,
   currentChat,
+  deleteChats,
   findInsertionAnchor,
   isDarkTheme,
   parseChatId,
   readSidebarChats,
 } from '../src/core/gemini-dom';
-import { CHATS, mountGemini } from './fixture';
+import { CHATS, fakeGeminiDeletes, mountGemini } from './fixture';
 
 describe('URLs', () => {
   test('parseChatId', () => {
@@ -94,5 +95,64 @@ describe('sidebar', () => {
     expect(isDarkTheme(document)).toBe(true);
     document.body.className = 'light-theme';
     expect(isDarkTheme(document)).toBe(false);
+  });
+});
+
+describe('deleteChats', () => {
+  beforeEach(() => mountGemini());
+  const fast = { stepTimeoutMs: 200, removeTimeoutMs: 200, loadTimeoutMs: 100, pauseMs: 0 };
+  const ids = () => readSidebarChats(document).map((c) => c.id);
+
+  test('goes through the ⋯ menu and the confirm dialog for each chat', async () => {
+    const fake = fakeGeminiDeletes();
+    const progress: string[] = [];
+    const result = await deleteChats(document, [CHATS[0]!.id, CHATS[2]!.id], {
+      ...fast,
+      onProgress: (done, total) => progress.push(`${done}/${total}`),
+    });
+    fake.stop();
+    expect(result).toEqual({ deleted: [CHATS[0]!.id, CHATS[2]!.id], failed: [], skipped: [] });
+    expect(ids()).toEqual([CHATS[1]!.id]);
+    expect(progress).toEqual(['1/2', '2/2']);
+    expect(fake.log).toEqual([`menu:${CHATS[0]!.id}`, `confirm:${CHATS[0]!.id}`, `menu:${CHATS[2]!.id}`, `confirm:${CHATS[2]!.id}`]);
+  });
+
+  test('scrolls the list to load older chats first', async () => {
+    const old = { id: '0123456789abcdef', title: 'Very old chat' };
+    const fake = fakeGeminiDeletes({ older: [old] });
+    const result = await deleteChats(document, [old.id], fast);
+    fake.stop();
+    expect(result.deleted).toEqual([old.id]);
+  });
+
+  test('reports chats it could not find or that did not go away', async () => {
+    const fake = fakeGeminiDeletes({ broken: [CHATS[1]!.id] });
+    const result = await deleteChats(document, ['ffffffffffffffff', CHATS[1]!.id], fast);
+    fake.stop();
+    expect(result.deleted).toEqual([]);
+    expect(result.failed).toEqual([
+      { id: 'ffffffffffffffff', reason: 'not-loaded' },
+      { id: CHATS[1]!.id, reason: 'not-removed' },
+    ]);
+  });
+
+  test('closes the menu and confirms nothing when there is no delete dialog', async () => {
+    // A page with no fake menus: clicking ⋯ does nothing.
+    const result = await deleteChats(document, [CHATS[0]!.id], fast);
+    expect(result.failed).toEqual([{ id: CHATS[0]!.id, reason: 'no-menu' }]);
+    expect(ids()).toHaveLength(3);
+  });
+
+  test('stops between chats when asked', async () => {
+    const fake = fakeGeminiDeletes();
+    let stop = false;
+    const result = await deleteChats(document, CHATS.map((c) => c.id), {
+      ...fast,
+      shouldStop: () => stop,
+      onProgress: () => (stop = true),
+    });
+    fake.stop();
+    expect(result.deleted).toEqual([CHATS[0]!.id]);
+    expect(result.skipped).toEqual([CHATS[1]!.id, CHATS[2]!.id]);
   });
 });

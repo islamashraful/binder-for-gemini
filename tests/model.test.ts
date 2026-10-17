@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  chatIdsDeep,
   chatsIn,
   childrenOf,
   countDeep,
@@ -15,6 +16,7 @@ import {
   isInside,
   moveFolder,
   parseState,
+  removeChats,
   renameFolder,
   search,
   setCollapsed,
@@ -193,6 +195,22 @@ describe('chats', () => {
     const t = updateTitles(s, new Map([['c1', 'Transformers, explained simply']]));
     expect(t.chats.c1!.title).toBe('Transformers, explained simply');
     expect(t.chats.c2).toBe(s.chats.c2);
+  });
+
+  test('removeChats forgets several chats, or returns the same state', () => {
+    const s = sample();
+    expect(removeChats(s, ['nope'])).toBe(s);
+    const t = removeChats(s, ['c1', 'c3', 'nope']);
+    expect(Object.keys(t.chats)).toEqual(['c2', 'c4']);
+    expect(Object.keys(s.chats)).toHaveLength(4);
+  });
+
+  test('chatIdsDeep includes subfolders', () => {
+    const s = sample();
+    expect(chatIdsDeep(s, 'research').sort()).toEqual(['c1', 'c2', 'c3']);
+    expect(chatIdsDeep(s, 'ai').sort()).toEqual(['c1', 'c2']);
+    expect(chatIdsDeep(s, 'personal')).toEqual(['c4']);
+    expect(chatIdsDeep(s, 'bio')).toEqual(['c3']);
   });
 
   test('settings', () => {

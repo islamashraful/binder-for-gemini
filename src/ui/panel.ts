@@ -3,6 +3,7 @@ import {
   DEFAULT_FOLDER_NAME,
   MAX_NAME_LENGTH,
   childrenOf,
+  chatIdsDeep,
   chatsIn,
   countDeep,
   descendantIds,
@@ -27,10 +28,20 @@ export interface ChatRef {
   title: string;
 }
 
+export interface SelectionView {
+  ids: ReadonlySet<string>;
+  /** Set while the selected chats are being deleted. */
+  progress: { done: number; total: number } | null;
+  /** Shown in the selection bar, e.g. what went wrong last time. */
+  message: string | null;
+}
+
 export interface PanelContext {
   /** Chat open in the page right now (highlighted in the tree). */
   currentChat: ChatRef | null;
   pathname: string;
+  /** Picking chats to delete. null when not in that mode. */
+  selection?: SelectionView | null;
 }
 
 /** Everything the panel can ask for. The controller applies it and re-renders. */
@@ -48,6 +59,12 @@ export interface PanelActions {
   exportData(): void;
   /** Returns an error message, or null when it worked. */
   importData(text: string): string | null;
+  startSelecting(ids?: string[]): void;
+  setSelected(ids: string[], selected: boolean): void;
+  stopSelecting(): void;
+  /** Permanently deletes the selected chats from Gemini (already confirmed). */
+  deleteSelected(): void;
+  stopDeleting(): void;
 }
 
 type Menu =
@@ -68,6 +85,7 @@ export interface Panel {
   setTheme(dark: boolean): void;
   clearDrop(): void;
   closeMenu(): void;
+  showToast(text: string, error?: boolean): void;
   destroy(): void;
 }
 
@@ -85,6 +103,8 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
     draft: '',
     focusEditor: false,
     menu: null as OpenMenu | null,
+    /** The selection bar is asking "permanently delete?" */
+    confirming: false,
   };
   let rendering = false;
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -143,7 +163,9 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
   });
   const body = h('div', { class: 'body' }, searchBox, tree, toast);
   const wrap = h('div', { class: 'binder' }, header, body, fileInput);
-  const layer = h('div', { class: 'binder layer' });
+  const menuSlot = h('div');
+  const barSlot = h('div');
+  const layer = h('div', { class: 'binder layer' }, menuSlot, barSlot);
 
   // Keep typing in our inputs from reaching Gemini's page-wide shortcuts.
   for (const type of ['keydown', 'keyup', 'keypress']) {
@@ -159,16 +181,22 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
     if (!ui.menu) return;
     const key = menuKey(ui.menu);
     for (const node of e.composedPath()) {
-      if (node === layer.firstChild) return;
+      if (node === menuSlot.firstChild) return;
       if (node instanceof HTMLElement && node.dataset.opener === key) return;
     }
     closeMenu();
   };
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key === 'Escape' && ui.menu) closeMenu();
+    if (e.key !== 'Escape') return;
+    if (ui.menu) closeMenu();
+    else if (ui.confirming) {
+      ui.confirming = false;
+      renderBar();
+    } else if (ctx.selection && !ctx.selection.progress) actions.stopSelecting();
   };
   const panelHost = (root as ShadowRoot).host ?? root;
   const onViewportChange = (e: Event) => {
+    if (e.type === 'resize') renderBar();
     if (!ui.menu) return;
     // Only scrolling the sidebar moves our buttons. The chat area scrolls
     // constantly while Gemini is answering, and the menu can scroll itself.
@@ -193,6 +221,7 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
     searchBox.hidden = Object.keys(state.folders).length === 0;
     renderTree();
     renderMenu();
+    renderBar();
   }
 
   function renderHeader() {
@@ -299,6 +328,7 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
     const hasContent = count > 0 || childrenOf(state, f.id).length > 0;
     const renaming = ui.editing?.kind === 'rename' && ui.editing.id === f.id;
     const menuOpen = ui.menu?.kind === 'folder' && ui.menu.id === f.id;
+    const sel = ctx.selection;
 
     const row: HTMLElement = h(
       'div',
@@ -356,7 +386,8 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
       icon('folder', `c-${f.color}`),
       renaming ? editor(`Rename ${f.name}`) : h('span', { class: 'label', title: f.name }, f.name),
       renaming ? null : h('span', { class: 'count' }, count ? String(count) : ''),
-      renaming
+      sel && !renaming ? folderCheckbox(f, sel) : null,
+      renaming || sel
         ? null
         : h(
             'button',
@@ -380,18 +411,27 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
 
   function chatRow(c: FiledChat, depth: number): HTMLElement {
     const active = ctx.currentChat?.id === c.id;
+    const sel = ctx.selection;
+    const selected = !!sel?.ids.has(c.id);
+    const toggle = () => {
+      if (sel && !sel.progress) actions.setSelected([c.id], !selected);
+    };
     const row: HTMLElement = h(
       'a',
       {
-        class: `row chat${active ? ' active' : ''}`,
+        class: `row chat${active ? ' active' : ''}${selected ? ' selected' : ''}`,
         href: chatPath(c.id, ctx.pathname),
         role: 'treeitem',
         'aria-level': depth + 1,
         'aria-current': active ? 'page' : undefined,
         title: c.title,
-        draggable: true,
+        draggable: !sel,
         style: pad(depth),
-        onClick: (e: MouseEvent) => actions.openChat(c.id, e),
+        onClick: (e: MouseEvent) => {
+          if (!sel) return actions.openChat(c.id, e);
+          e.preventDefault();
+          toggle();
+        },
         onDragstart: (e: DragEvent) => {
           drag.start({ kind: 'chat', id: c.id, title: c.title }, e);
           row.classList.add('dragging');
@@ -418,22 +458,63 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
       },
       h('span', { class: 'caret empty' }),
       h('span', { class: 'label' }, c.title),
-      h(
-        'button',
-        {
-          class: 'act',
-          title: 'Remove from folder',
-          'aria-label': `Remove ${c.title} from folder`,
-          onClick: (e: MouseEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            actions.unfileChat(c.id);
-          },
-        },
-        icon('close'),
-      ),
+      sel
+        ? checkbox(selected, `Select ${c.title}`, toggle, !!sel.progress)
+        : h(
+            'button',
+            {
+              class: 'act',
+              title: 'Remove from folder',
+              'aria-label': `Remove ${c.title} from folder`,
+              onClick: (e: MouseEvent) => {
+                e.preventDefault();
+                e.stopPropagation();
+                actions.unfileChat(c.id);
+              },
+            },
+            icon('close'),
+          ),
     );
     return row;
+  }
+
+  function checkbox(
+    checked: boolean | 'mixed',
+    label: string,
+    onToggle: () => void,
+    disabled = false,
+  ): HTMLElement {
+    return h(
+      'button',
+      {
+        class: `check${checked === true ? ' on' : checked === 'mixed' ? ' mixed' : ''}`,
+        role: 'checkbox',
+        'aria-checked': String(checked),
+        'aria-label': label,
+        title: label,
+        disabled,
+        onClick: (e: MouseEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onToggle();
+        },
+        onDblclick: (e: MouseEvent) => e.stopPropagation(),
+      },
+      icon(checked === 'mixed' ? 'remove' : 'check'),
+    );
+  }
+
+  /** Ticks every chat in the folder and its subfolders. */
+  function folderCheckbox(f: Folder, sel: SelectionView): HTMLElement {
+    const ids = chatIdsDeep(state, f.id);
+    const n = ids.filter((id) => sel.ids.has(id)).length;
+    const checked = n > 0 && n === ids.length ? true : n > 0 ? 'mixed' : false;
+    return checkbox(
+      checked,
+      `Select all chats in ${f.name}`,
+      () => actions.setSelected(ids, checked !== true),
+      !ids.length || !!sel.progress,
+    );
   }
 
   function newFolderRow(depth: number): HTMLElement {
@@ -635,7 +716,7 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
   function renderMenu() {
     const m = ui.menu;
     if (!m) {
-      layer.replaceChildren();
+      menuSlot.replaceChildren();
       return;
     }
     let items: Child[] = [];
@@ -643,7 +724,7 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
       const f = state.folders[m.id];
       if (!f) {
         ui.menu = null;
-        layer.replaceChildren();
+        menuSlot.replaceChildren();
         return;
       }
       items = m.confirmDelete ? deleteConfirm(f) : folderMenu(f);
@@ -652,14 +733,14 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
     } else {
       if (!ctx.currentChat) {
         ui.menu = null;
-        layer.replaceChildren();
+        menuSlot.replaceChildren();
         return;
       }
       items = pickerMenu(ctx.currentChat);
     }
 
     const el = h('div', { class: 'menu', role: 'menu' }, items);
-    layer.replaceChildren(el);
+    menuSlot.replaceChildren(el);
 
     // Keep the menu on screen: flip above the button if there's no room below.
     const w = el.offsetWidth;
@@ -700,6 +781,9 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
         ),
       ),
       sep(),
+      menuItem('deleteChats', 'Delete chats in this folder…', () => beginSelecting(chatIdsDeep(state, f.id)), {
+        disabled: countDeep(state, f.id) === 0 || !!ctx.selection?.progress,
+      }),
       menuItem(
         'delete',
         'Delete folder',
@@ -762,6 +846,8 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
         h('span', { class: 'grow' }, 'Hide filed chats from the list'),
       ),
       sep(),
+      menuItem('deleteChats', 'Delete chats…', () => beginSelecting(), { disabled: !!ctx.selection }),
+      sep(),
       menuItem('download', 'Export backup', () => actions.exportData()),
       menuItem('upload', 'Restore from backup…', () => fileInput.click()),
       h(
@@ -801,6 +887,68 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
     ];
   }
 
+  // ---------------------------------------------------------------- deleting chats
+
+  function beginSelecting(ids?: string[]) {
+    ui.confirming = false;
+    if (state.settings.sectionCollapsed) actions.setSetting('sectionCollapsed', false);
+    actions.startSelecting(ids);
+  }
+
+  /** Floating bar at the bottom of the sidebar while picking chats to delete. */
+  function renderBar() {
+    const sel = ctx.selection;
+    if (!sel) {
+      ui.confirming = false;
+      barSlot.replaceChildren();
+      return;
+    }
+    const n = sel.ids.size;
+    const chats = `${n} chat${n === 1 ? '' : 's'}`;
+    let content: Child[];
+    if (sel.progress) {
+      const { done, total } = sel.progress;
+      content = [
+        h('div', { class: 'bar-text' }, h('b', null, `Deleting ${Math.min(done + 1, total)} of ${total}…`),
+          h('div', { class: 'bar-hint' }, 'Keep this tab open.')),
+        h('div', { class: 'bar-actions' }, h('button', { class: 'btn', onClick: () => actions.stopDeleting() }, 'Stop')),
+        h('div', { class: 'bar-progress' }, h('div', { style: { width: `${(done / total) * 100}%` } })),
+      ];
+    } else if (ui.confirming && n) {
+      content = [
+        h('div', { class: 'bar-text' }, h('b', null, `Permanently delete ${chats} from Gemini?`),
+          h('div', { class: 'bar-hint' }, 'This can’t be undone.')),
+        h(
+          'div',
+          { class: 'bar-actions' },
+          h('button', { class: 'btn', onClick: () => { ui.confirming = false; renderBar(); } }, 'Cancel'),
+          h('button', { class: 'btn danger', onClick: () => { ui.confirming = false; actions.deleteSelected(); } }, `Delete ${n}`),
+        ),
+      ];
+    } else {
+      content = [
+        h('div', { class: 'bar-text' }, h('b', null, n ? `${chats} selected` : 'Select chats to delete'),
+          h('div', { class: `bar-hint${sel.message ? ' error' : ''}` },
+            sel.message ?? 'Click chats here or in Gemini’s list. Shift-click selects a range.')),
+        h(
+          'div',
+          { class: 'bar-actions' },
+          h('button', { class: 'btn', onClick: () => actions.stopSelecting() }, 'Cancel'),
+          h('button', { class: 'btn danger', disabled: !n, onClick: () => { ui.confirming = true; renderBar(); } }, 'Delete…'),
+        ),
+      ];
+    }
+    const bar = h('div', { class: 'selbar', role: 'region', 'aria-label': 'Delete chats' }, content);
+    barSlot.replaceChildren(bar);
+
+    // Sit at the bottom of Gemini's sidebar, matching its width.
+    const r = (panelHost as Element).getBoundingClientRect?.();
+    if (r && r.width > 0) {
+      bar.style.left = `${Math.max(8, r.left)}px`;
+      bar.style.width = `${Math.max(240, r.width - 8)}px`;
+    }
+  }
+
   // ---------------------------------------------------------------- import
 
   async function onImportFile() {
@@ -837,6 +985,7 @@ export function createPanel(root: Node, layerRoot: Node, actions: PanelActions):
     },
     clearDrop,
     closeMenu,
+    showToast,
     destroy() {
       clearTimeout(toastTimer);
       document.removeEventListener('pointerdown', onPointerDown, true);

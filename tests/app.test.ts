@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { startApp, type App } from '../src/app';
 import { createFolder, emptyState, fileChat } from '../src/core/model';
 import { createMemoryStore } from '../src/core/store';
-import { CHATS, addSidebarChat, mountGemini, nativeItem } from './fixture';
+import { CHATS, addSidebarChat, fakeGeminiDeletes, mountGemini, nativeItem } from './fixture';
 
 let app: App;
 let mem: ReturnType<typeof createMemoryStore>;
@@ -18,6 +18,7 @@ async function start(seed: unknown = null) {
     debounceMs: 0,
     download: (name, text) => log.push(`download:${name}:${text.length > 0}`),
     navigate: (path) => log.push(`navigate:${path}`),
+    deleteOptions: { stepTimeoutMs: 200, removeTimeoutMs: 200, loadTimeoutMs: 50, pauseMs: 0 },
   });
 }
 
@@ -373,5 +374,122 @@ describe('search and backup', () => {
     button('More options').click();
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     expect(layer().querySelector('.menu')).toBeNull();
+  });
+});
+
+describe('deleting chats', () => {
+  let fake: ReturnType<typeof fakeGeminiDeletes> | null = null;
+  afterEach(() => {
+    fake?.stop();
+    fake = null;
+  });
+
+  const bar = () => layer().querySelector<HTMLElement>('.selbar');
+  const barButton = (text: string) =>
+    [...layer().querySelectorAll<HTMLElement>('.selbar .btn')].find((b) => b.textContent === text)!;
+  const clickNative = (id: string, init: MouseEventInit = {}) => {
+    const e = new MouseEvent('click', { bubbles: true, cancelable: true, ...init });
+    document.querySelector(`a[href="/app/${id}"] .title-text`)!.dispatchEvent(e);
+    return e;
+  };
+  const selected = (id: string) => nativeItem(id).hasAttribute('data-binder-selected');
+  const until = async (check: () => boolean) => {
+    for (let i = 0; i < 200 && !check(); i++) await new Promise((r) => setTimeout(r, 10));
+    expect(check()).toBe(true);
+  };
+
+  test('“Delete chats…” turns clicks in Gemini’s list into ticks; Cancel ends it', async () => {
+    await start();
+    button('More options').click();
+    menuItem('Delete chats').click();
+    expect(document.documentElement.classList.contains('binder-selecting')).toBe(true);
+    expect(bar()!.textContent).toContain('Select chats to delete');
+
+    const e = clickNative(CHATS[0]!.id);
+    expect(e.defaultPrevented).toBe(true); // did not open the chat
+    expect(selected(CHATS[0]!.id)).toBe(true);
+    expect(bar()!.textContent).toContain('1 chat selected');
+    clickNative(CHATS[0]!.id);
+    expect(selected(CHATS[0]!.id)).toBe(false);
+
+    barButton('Cancel').click();
+    expect(bar()).toBeNull();
+    expect(document.documentElement.classList.contains('binder-selecting')).toBe(false);
+    expect(clickNative(CHATS[0]!.id).defaultPrevented).toBe(false);
+  });
+
+  test('shift-click selects a range in Gemini’s list', async () => {
+    await start();
+    button('More options').click();
+    menuItem('Delete chats').click();
+    clickNative(CHATS[0]!.id);
+    clickNative(CHATS[2]!.id, { shiftKey: true });
+    expect(CHATS.map((c) => selected(c.id))).toEqual([true, true, true]);
+    expect(bar()!.textContent).toContain('3 chats selected');
+  });
+
+  test('a folder checkbox selects everything in it', async () => {
+    await start(seeded());
+    button('More options').click();
+    menuItem('Delete chats').click();
+    expect(button('Options for Research')).toBeFalsy(); // ⋯ is replaced by a checkbox
+    button('Select all chats in Research').click();
+    expect(button(`Select ${CHATS[0]!.title}`).getAttribute('aria-checked')).toBe('true');
+    expect(button('Select all chats in Travel').hasAttribute('disabled')).toBe(true);
+    // Clicking a filed chat ticks it instead of opening it.
+    $$('.row.chat')[0]!.click();
+    expect(log).toEqual([]);
+    expect(button('Select all chats in Research').getAttribute('aria-checked')).toBe('false');
+  });
+
+  test('confirms, deletes through Gemini, and unfiles deleted chats', async () => {
+    fake = fakeGeminiDeletes();
+    await start(seeded());
+    button('Options for Research').click();
+    menuItem('Delete chats in this folder').click();
+    clickNative(CHATS[1]!.id);
+    expect(bar()!.textContent).toContain('2 chats selected');
+
+    barButton('Delete…').click();
+    expect(bar()!.textContent).toContain('Permanently delete 2 chats from Gemini?');
+    expect(bar()!.textContent).toContain('can’t be undone');
+    barButton('Cancel').click();
+    expect(bar()!.textContent).toContain('2 chats selected');
+    expect(fake.log).toEqual([]);
+
+    barButton('Delete…').click();
+    barButton('Delete 2').click();
+    expect(bar()!.textContent).toContain('Deleting 1 of 2');
+    await until(() => bar() === null);
+
+    expect(fake.log.filter((l) => l.startsWith('confirm'))).toHaveLength(2);
+    expect(document.querySelector(`a[href="/app/${CHATS[0]!.id}"]`)).toBeNull();
+    expect(document.querySelector(`a[href="/app/${CHATS[1]!.id}"]`)).toBeNull();
+    expect(app.getState().chats).toEqual({});
+    expect(mem.peek()!.chats).toEqual({});
+    expect($('.toast')!.textContent).toBe('Deleted 2 chats.');
+  });
+
+  test('chats that fail stay selected with a message', async () => {
+    fake = fakeGeminiDeletes({ broken: [CHATS[2]!.id] });
+    await start();
+    button('More options').click();
+    menuItem('Delete chats').click();
+    clickNative(CHATS[1]!.id);
+    clickNative(CHATS[2]!.id);
+    barButton('Delete…').click();
+    barButton('Delete 2').click();
+    await until(() => !!bar()?.textContent?.includes('couldn’t be deleted'));
+    expect(bar()!.textContent).toContain('Deleted 1 chat.');
+    expect(bar()!.textContent).toContain('1 chat selected');
+    expect(selected(CHATS[2]!.id)).toBe(true);
+  });
+
+  test('Escape leaves select mode', async () => {
+    await start();
+    button('More options').click();
+    menuItem('Delete chats').click();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(bar()).toBeNull();
   });
 });

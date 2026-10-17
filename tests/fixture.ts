@@ -16,6 +16,11 @@ function chatItem(c: FixtureChat): string {
       <a class="mat-mdc-list-item gem-nav-list-item" href="/app/${c.id}" aria-label="${c.title}">
         <span class="mdc-list-item__content"><span class="title-text gds-body-s">${c.title}</span></span>
       </a>
+      <div class="hovered-trailing-content">
+        <gem-icon-button data-test-id="actions-menu-button" aria-haspopup="menu">
+          <button aria-label="Open menu for conversation actions."></button>
+        </gem-icon-button>
+      </div>
     </gem-nav-list-item>`;
 }
 
@@ -43,5 +48,69 @@ export function addSidebarChat(c: FixtureChat) {
 }
 
 export function nativeItem(id: string): HTMLElement {
-  return document.querySelector<HTMLElement>(`a[href="/app/${id}"]`)!.closest('gem-nav-list-item')!;
+  return document.querySelector<HTMLElement>(`a[href="/app/${id}"]`)?.closest('gem-nav-list-item')!;
+}
+
+/**
+ * Makes the fake page behave like Gemini's delete flow: ⋯ opens a menu,
+ * Delete opens a confirmation dialog, confirming removes the chat.
+ *   broken: chats whose delete never goes through
+ *   older:  chats that only load after scrolling the list
+ */
+export function fakeGeminiDeletes(opts: { broken?: string[]; older?: FixtureChat[] } = {}) {
+  const log: string[] = [];
+  const older = [...(opts.older ?? [])];
+  const overlay = document.createElement('div');
+  overlay.className = 'cdk-overlay-container';
+  document.body.appendChild(overlay);
+  const later = (fn: () => void) => setTimeout(fn, 5);
+
+  const onClick = (e: Event) => {
+    const t = e.target as Element;
+    const opener = t.closest?.('[data-test-id="actions-menu-button"]');
+    if (opener) {
+      const id = opener.closest('gem-nav-list-item')!.querySelector('a')!.getAttribute('href')!.split('/').pop()!;
+      log.push(`menu:${id}`);
+      later(() => {
+        overlay.innerHTML = `<div class="cdk-overlay-backdrop"></div>
+          <div class="cdk-overlay-pane"><div role="menu" class="conversation-actions-menu">
+            <button data-test-id="share-button">Share conversation</button>
+            <button data-test-id="delete-button" data-chat="${id}">Delete</button>
+          </div></div>`;
+      });
+    } else if (t.closest?.('.cdk-overlay-backdrop')) {
+      overlay.replaceChildren();
+    } else if (t.closest?.('[data-test-id="delete-button"]')) {
+      const id = (t.closest('[data-test-id="delete-button"]') as HTMLElement).dataset.chat!;
+      overlay.replaceChildren();
+      later(() => {
+        overlay.innerHTML = `<mat-dialog-container role="dialog">
+          <h2>Delete chat?</h2>
+          <button data-test-id="cancel-button">Cancel</button>
+          <button data-test-id="confirm-button" data-chat="${id}">Delete</button>
+        </mat-dialog-container>`;
+      });
+    } else if (t.closest?.('[data-test-id="cancel-button"]')) {
+      log.push('cancel');
+      overlay.replaceChildren();
+    } else if (t.closest?.('[data-test-id="confirm-button"]')) {
+      const id = (t.closest('[data-test-id="confirm-button"]') as HTMLElement).dataset.chat!;
+      overlay.replaceChildren();
+      log.push(`confirm:${id}`);
+      if (!opts.broken?.includes(id)) later(() => nativeItem(id)?.remove());
+    }
+  };
+  const onScroll = () => {
+    const next = older.shift();
+    if (next) later(() => addSidebarChat(next));
+  };
+  document.addEventListener('click', onClick);
+  document.querySelector('infinite-scroller')!.addEventListener('scroll', onScroll);
+  return {
+    log,
+    stop() {
+      document.removeEventListener('click', onClick);
+      overlay.remove();
+    },
+  };
 }
